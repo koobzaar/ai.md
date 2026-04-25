@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/badge/tampermonkey-compatible-blue" alt="Tampermonkey"/>
     <img src="https://img.shields.io/badge/platforms-ChatGPT%20%7C%20Claude%20%7C%20Gemini-orange" alt="Platforms"/>
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License"/>
-    <img src="https://img.shields.io/badge/version-0.3.0-lightgrey" alt="Version"/>
+    <img src="https://img.shields.io/badge/version-0.4.0-lightgrey" alt="Version"/>
   </p>
 </div>
 
@@ -30,7 +30,7 @@
 - YAML frontmatter with title, platform, export date, source URL, turn count, and best-effort model metadata
 - Captures Gemini reasoning blocks when they are present and expandable
 - Captures metadata for user-uploaded images in Gemini prompts
-- Converts Gemini message DOM to Markdown, including headings, emphasis, inline code, fenced code blocks, tables, lists, links, and KaTeX annotations
+- Uses Gemini's native prompt and response copy buttons to preserve site-native copied output
 - Converts ChatGPT conversation DOM to Markdown using ChatGPT's message role attributes and turn containers
 - Uses Claude's native per-message copy buttons to preserve Claude's own copied Markdown output
 - Adds a floating export control on both supported sites
@@ -118,15 +118,16 @@ This first-pass adapter is focused on text fidelity and structure. It is intenti
 
 ### Gemini
 
-Gemini export uses direct DOM traversal and Markdown conversion:
+Gemini export now uses Gemini's native copy buttons for prompt and response text:
 
 1. It scrolls the Gemini conversation container to load older content.
 2. It expands collapsed reasoning panels when present.
-3. It reads `user-query-content` and `model-response` elements from the page.
-4. It converts supported HTML structures into Markdown using a recursive DOM walker.
-5. It adds Gemini image metadata when prompt uploads are detected.
+3. It captures user prompts via `data-test-id="prompt-copy-button"`.
+4. It captures model responses via `message-actions [data-test-id="copy-button"]`.
+5. It keeps reasoning as a focused DOM extraction from `data-test-id="thoughts-content"`.
+6. It adds Gemini image metadata when prompt uploads are detected.
 
-The DOM walker handles common inline and block elements plus Gemini-specific code blocks and KaTeX annotations.
+This tracks Gemini's own copied output more closely than reconstructing the full response from the live DOM.
 
 ## Limitations
 
@@ -138,8 +139,9 @@ The DOM walker handles common inline and block elements plus Gemini-specific cod
 - ChatGPT artifacts and canvas-style outputs are not explicitly exported.
 - ChatGPT model metadata is best effort and depends on the current model switcher label being available in the page.
 - Gemini attachment handling is limited to uploaded image metadata on user prompts.
+- Gemini export depends on native Gemini copy buttons and clipboard APIs being available in page context.
 - Conversation loading is best effort and depends on the current web UI structure remaining compatible.
-- Gemini Markdown conversion is structured and useful, but it is not guaranteed to match site-native copy output exactly.
+- Gemini reasoning capture still depends on the current DOM structure for the thoughts panel.
 
 ## Compatibility
 
@@ -147,7 +149,7 @@ The DOM walker handles common inline and block elements plus Gemini-specific cod
 |----------|:-:|:-:|:-:|----------|
 | ChatGPT | Best effort | No | Best effort | Custom DOM-to-Markdown conversion |
 | Claude | Best effort | No | No | Native Claude copy buttons |
-| Gemini | Best effort | Yes | Images only | Custom DOM-to-Markdown conversion |
+| Gemini | Best effort | Yes | Images only | Native Gemini copy buttons |
 
 Validated on Chromium-based browsers and Firefox with Tampermonkey.
 

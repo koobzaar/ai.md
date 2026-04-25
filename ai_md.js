@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ai.md Transcript Exporter (LLM Optimized)
 // @description  Exports Gemini, Claude, and ChatGPT conversations to structured Markdown optimized for downstream LLM ingestion.
-// @version      0.3.0
+// @version      0.4.0
 // @author       you
 // @namespace    ai-md-export
 // @include      *://gemini.google.com/*
@@ -30,6 +30,18 @@
     conversationTitle: '[data-testid="chat-title-button"] .truncate, button[data-testid="chat-title-button"] div.truncate',
     messageActionsGroup: '[role="group"][aria-label="Message actions"]',
     feedbackButton: 'button[aria-label="Give positive feedback"]',
+  };
+
+  const GEMINI_SELECTORS = {
+    conversationContainer: '.conversation-container',
+    conversationTitle: 'conversations-list div.selected',
+    userContent: 'user-query-content',
+    promptCopyButton: '[data-test-id="prompt-copy-button"]',
+    modelResponse: 'model-response',
+    responseContainer: 'response-container',
+    responseCopyButton: 'message-actions [data-test-id="copy-button"]',
+    reasoningToggle: 'button[data-test-id="thoughts-header-button"][aria-expanded="false"]',
+    reasoningContent: '[data-test-id="thoughts-content"] message-content, [data-test-id="thoughts-content"]',
   };
 
   const CHATGPT_SELECTORS = {
@@ -296,7 +308,7 @@ Source: ${location.href}
 
     while (true) {
       const scroller = findGeminiScroller();
-      const convs = document.querySelectorAll('.conversation-container');
+      const convs = document.querySelectorAll(GEMINI_SELECTORS.conversationContainer);
       const first = convs[0];
 
       if (first) first.scrollIntoView({ behavior: 'instant', block: 'start' });
@@ -310,7 +322,7 @@ Source: ${location.href}
       await wait(pollMs);
 
       const elapsed = Math.round((Date.now() - startTime) / 1000);
-      const currentCount = document.querySelectorAll('.conversation-container').length;
+      const currentCount = document.querySelectorAll(GEMINI_SELECTORS.conversationContainer).length;
       const currentHeight = findGeminiScroller().scrollHeight;
       setButtonState(`Loading... ${elapsed}s (${currentCount} msgs)`, true);
 
@@ -331,9 +343,7 @@ Source: ${location.href}
   }
 
   async function expandGeminiReasoning() {
-    const btns = document.querySelectorAll(
-      'button[data-test-id="thoughts-header-button"][aria-expanded="false"]'
-    );
+    const btns = document.querySelectorAll(GEMINI_SELECTORS.reasoningToggle);
 
     if (!btns.length) return;
     setButtonState(`Expanding reasoning (${btns.length})...`, true);
@@ -341,48 +351,152 @@ Source: ${location.href}
     await wait(600);
   }
 
+  function getGeminiTitle() {
+    return document.querySelector(GEMINI_SELECTORS.conversationTitle)?.textContent?.trim()
+      || document.title?.replace(' - Gemini', '').trim()
+      || 'Gemini Conversation';
+  }
+
+  function getGeminiTurns() {
+    return Array.from(document.querySelectorAll(GEMINI_SELECTORS.conversationContainer));
+  }
+
+  function extractGeminiReasoning(turnEl) {
+    const reasoningNode = turnEl.querySelector(GEMINI_SELECTORS.reasoningContent);
+    if (!reasoningNode) return null;
+
+    const reasoning = toMd(reasoningNode);
+    return reasoning || null;
+  }
+
+  async function captureGeminiConversation() {
+    const turns = getGeminiTurns();
+    const originalWriteText = navigator.clipboard?.writeText;
+    const originalWrite = navigator.clipboard?.write;
+
+    if (!navigator.clipboard || typeof originalWriteText !== 'function') {
+      throw new Error('Clipboard API is unavailable in this browser context.');
+    }
+
+    const messages = [];
+    let currentCapture = null;
+
+    try {
+      navigator.clipboard.writeText = async (text) => {
+        if (currentCapture && typeof text === 'string' && text.trim()) {
+          currentCapture.push(text.trim());
+        }
+        return undefined;
+      };
+
+      if (typeof originalWrite === 'function') {
+        navigator.clipboard.write = async (items) => {
+          if (currentCapture && Array.isArray(items)) {
+            for (const item of items) {
+              if (!item?.types?.includes('text/plain')) continue;
+              const blob = await item.getType('text/plain');
+              const text = await blob.text();
+              if (text.trim()) currentCapture.push(text.trim());
+              break;
+            }
+          }
+          return undefined;
+        };
+      }
+    } catch (error) {
+      throw new Error(`Could not intercept Gemini copy actions: ${error.message}`);
+    }
+
+    try {
+      for (let i = 0; i < turns.length; i++) {
+        const turn = turns[i];
+        const userContent = turn.querySelector(GEMINI_SELECTORS.userContent);
+        const response = turn.querySelector(GEMINI_SELECTORS.modelResponse);
+        const promptCopyButton = turn.querySelector(GEMINI_SELECTORS.promptCopyButton);
+        const responseCopyButton = turn.querySelector(GEMINI_SELECTORS.responseCopyButton);
+
+        if (!userContent && !response) continue;
+
+        let copiedUser = null;
+        let copiedResponse = null;
+
+        if (promptCopyButton) {
+          const promptCaptures = [];
+          currentCapture = promptCaptures;
+          promptCopyButton.scrollIntoView({ behavior: 'instant', block: 'center' });
+          setButtonState(`Copying Gemini prompts ${i + 1}/${turns.length}`, true);
+          promptCopyButton.click();
+
+          if (await waitForCapture(promptCaptures, 0)) {
+            copiedUser = promptCaptures.at(-1) || null;
+          } else {
+            console.warn(`[Gemini Export] Missed clipboard capture for prompt ${i + 1}.`);
+          }
+        }
+
+        if (responseCopyButton) {
+          const responseCaptures = [];
+          currentCapture = responseCaptures;
+          responseCopyButton.scrollIntoView({ behavior: 'instant', block: 'center' });
+          setButtonState(`Copying Gemini responses ${i + 1}/${turns.length}`, true);
+          responseCopyButton.click();
+
+          if (await waitForCapture(responseCaptures, 0)) {
+            copiedResponse = responseCaptures.at(-1) || null;
+          } else {
+            console.warn(`[Gemini Export] Missed clipboard capture for response ${i + 1}.`);
+          }
+        }
+
+        currentCapture = null;
+
+        const fallbackResponseNode = response?.querySelector('message-content') || response;
+        const user = copiedUser || (userContent ? toMd(userContent) : null);
+        const model = copiedResponse || (fallbackResponseNode ? toMd(fallbackResponseNode) : null);
+
+        if (!user && !model) continue;
+
+        messages.push({
+          user,
+          attachments: userContent ? extractGeminiImages(userContent) : null,
+          reasoning: extractGeminiReasoning(turn),
+          response: model,
+        });
+
+        await wait(80);
+      }
+    } finally {
+      currentCapture = null;
+      try {
+        navigator.clipboard.writeText = originalWriteText;
+      } catch (error) {
+        console.warn('[Gemini Export] Failed to restore clipboard.writeText', error);
+      }
+      if (typeof originalWrite === 'function') {
+        try {
+          navigator.clipboard.write = originalWrite;
+        } catch (error) {
+          console.warn('[Gemini Export] Failed to restore clipboard.write', error);
+        }
+      }
+    }
+
+    return messages;
+  }
+
   async function exportGemini() {
     setButtonState('Loading Gemini thread...', true);
     await loadGeminiConversation();
     await expandGeminiReasoning();
+    const rawTitle = getGeminiTitle();
+    const turns = getGeminiTurns();
+    const firstReply = turns
+      .map((turn) => turn.querySelector(GEMINI_SELECTORS.responseContainer) || turn.querySelector(GEMINI_SELECTORS.modelResponse))
+      .find(Boolean);
+    const modelName = firstReply ? getGeminiModelName(firstReply) : 'Gemini';
+    const messages = await captureGeminiConversation();
 
-    const rawTitle = document.querySelector('conversations-list div.selected')?.textContent?.trim()
-      || document.title?.replace(' - Gemini', '').trim()
-      || 'Gemini Conversation';
-
-    const queries = Array.from(document.querySelectorAll('user-query-content'));
-    const replies = Array.from(document.querySelectorAll('model-response'));
-    const pairs = Math.min(queries.length, replies.length);
-
-    if (pairs === 0 && !queries.length) throw new Error('No conversation found.');
-
-    const modelName = replies[0]
-      ? getGeminiModelName(replies[0].closest('response-container') || replies[0])
-      : 'Gemini';
-
-    const messages = [];
-
-    for (let i = 0; i < pairs; i++) {
-      const replyContainer = replies[i].closest('response-container') || replies[i];
-      const thoughtsPanel = replies[i].querySelector('.thoughts-content');
-      const messageContent = replies[i].querySelector('message-content') || replies[i];
-
-      messages.push({
-        user: toMd(queries[i]),
-        attachments: extractGeminiImages(queries[i]),
-        reasoning: thoughtsPanel?.textContent?.trim() || null,
-        response: toMd(messageContent),
-      });
-    }
-
-    if (queries.length > replies.length) {
-      messages.push({
-        user: toMd(queries.at(-1)),
-        attachments: extractGeminiImages(queries.at(-1)),
-        reasoning: null,
-        response: null,
-      });
-    }
+    if (!messages.length) throw new Error('No Gemini conversation found.');
 
     const markdown = buildStructuredMarkdown({
       title: rawTitle,
@@ -903,7 +1017,7 @@ Source: ${location.href}
   function inject() {
     if (!document.body || document.getElementById(UI_IDS.container)) return;
     document.body.appendChild(createUI());
-    console.log(`[${getAppLabel()} Export] v0.3.0 ready`);
+    console.log(`[${getAppLabel()} Export] v0.4.0 ready`);
   }
 
   if (document.body) inject();
