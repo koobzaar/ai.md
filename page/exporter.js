@@ -17,6 +17,11 @@
       source: true,
     },
   };
+  const DOWNLOAD_URL_REVOKE_DELAY_MS = 60 * 1000;
+  const CLAUDE_CAPTURE_TIMEOUT_MS = 1200;
+  const CLAUDE_CAPTURE_POLL_MS = 25;
+  const CLAUDE_CAPTURE_MAX_ATTEMPTS = 3;
+  const CLAUDE_CAPTURE_RETRY_DELAY_MS = 120;
 
   const CLAUDE_SELECTORS = {
     copyButton: 'button[data-testid="action-bar-copy"]',
@@ -98,10 +103,15 @@
     a.download = buildFilename(title);
     document.body.appendChild(a);
     a.click();
+
     setTimeout(() => {
-      document.body.removeChild(a);
+      a.remove();
+    }, 0);
+
+    // Large Blob downloads can start after the click handler returns.
+    setTimeout(() => {
       URL.revokeObjectURL(url);
-    }, 100);
+    }, DOWNLOAD_URL_REVOKE_DELAY_MS);
   }
 
   function normalizeSettings(settings) {
@@ -616,31 +626,64 @@
   }
 
   async function waitForCapture(list, previousLength) {
-    const timeoutMs = 1200;
     const started = Date.now();
 
-    while (Date.now() - started < timeoutMs) {
+    while (Date.now() - started < CLAUDE_CAPTURE_TIMEOUT_MS) {
       if (list.length > previousLength) return true;
-      await wait(25);
+      await wait(CLAUDE_CAPTURE_POLL_MS);
     }
 
     return false;
+  }
+
+  function isClaudeEmptyResponseCopy(button) {
+    const actionsGroup = button.closest(CLAUDE_SELECTORS.messageActionsGroup);
+    if (!actionsGroup?.querySelector(CLAUDE_SELECTORS.feedbackButton)) return false;
+
+    const renderedTurn = actionsGroup.previousElementSibling;
+    const responseRoot = renderedTurn?.querySelector(".font-claude-response");
+    if (!responseRoot) return false;
+
+    return !responseRoot.querySelector(".standard-markdown, .progressive-markdown");
   }
 
   async function captureClaudeMessages(buttons, destination, label) {
     for (let i = 0; i < buttons.length; i++) {
       const btn = buttons[i];
       btn.scrollIntoView({ behavior: "instant", block: "center" });
-      setButtonState(`${label} ${i + 1}/${buttons.length}`, true);
-      const before = destination.length;
-      btn.click();
-      const captured = await waitForCapture(destination, before);
+      const messageIndex = i + 1;
 
-      if (!captured) {
-        console.warn(`[Claude Export] Missed clipboard capture for ${label.toLowerCase()} ${i + 1}.`);
+      for (let attempt = 1; attempt <= CLAUDE_CAPTURE_MAX_ATTEMPTS; attempt++) {
+        const retryLabel = attempt > 1
+          ? ` (retry ${attempt - 1}/${CLAUDE_CAPTURE_MAX_ATTEMPTS - 1})`
+          : "";
+        setButtonState(`${label} ${messageIndex}/${buttons.length}${retryLabel}`, true);
+
+        const before = destination.length;
+        btn.click();
+        const captured = await waitForCapture(destination, before);
+
+        if (captured) break;
+
+        if (isClaudeEmptyResponseCopy(btn)) {
+          destination.push("");
+          console.warn(
+            `[Claude Export] Treating empty Claude response ${messageIndex}/${buttons.length} as an unfinished response.`
+          );
+          break;
+        }
+
+        if (attempt === CLAUDE_CAPTURE_MAX_ATTEMPTS) {
+          throw new Error(
+            `Failed to capture Claude clipboard output for ${label.toLowerCase()} ${messageIndex}/${buttons.length}.`
+          );
+        }
+
+        console.warn(
+          `[Claude Export] Missed clipboard capture for ${label.toLowerCase()} ${messageIndex}; retrying.`
+        );
+        await wait(CLAUDE_CAPTURE_RETRY_DELAY_MS);
       }
-
-      await wait(80);
     }
   }
 
@@ -657,7 +700,8 @@
 
     try {
       navigator.clipboard.writeText = async (text) => {
-        if (typeof text === "string" && text.trim()) {
+        // Claude can expose a copy action for an empty in-progress response.
+        if (typeof text === "string") {
           currentTarget.push(text.trim());
         }
         return undefined;
